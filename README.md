@@ -85,6 +85,10 @@ with Bridge(toy, allow=["add", "echo"]) as bridge:
 
 For your own agent loop, with variables kept between cells, hold one `Sandbox` and pass `bridge.budget(n)` as each cell's `on_call`. `build_server(bridge)` returns the `run_python` server without starting it.
 
+## Agent skill
+
+[`skills/mcp-code-mode/SKILL.md`](skills/mcp-code-mode/SKILL.md) tells an agent when to reach for `run_python`, how to write the code and what the limits are. For Claude Code, copy the folder into `~/.claude/skills/` or into a project's `.claude/skills/`; agents that read `SKILL.md` files load it the same way. It is free, like the rest of this repository, and a test keeps its numbers in line with the code.
+
 ## How a call works
 
 1. `run_python` starts a fresh container holding Python and `runner.py`, nothing else. Each wrapped tool is an async function in the code's globals. MCP names that are not Python identifiers are renamed (`get-weather` becomes `get_weather`), and a name that would shadow a keyword, a builtin or a dunder such as `__builtins__` gets a trailing underscore.
