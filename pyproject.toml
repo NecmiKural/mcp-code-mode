@@ -1,6 +1,6 @@
 [project]
 name = "mcp-code-mode"
-version = "0.1.0"
+version = "0.2.0"
 description = "Run model-written Python against any MCP server's tools, in a locked-down Docker sandbox, through a host-side bridge that checks every call."
 readme = "README.md"
 license = "MIT"
