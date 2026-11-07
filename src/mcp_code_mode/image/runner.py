@@ -3,7 +3,7 @@
 Standard library only, and nothing from mcp_code_mode: the image holds this file and Python.
 The host talks to it over stdin and stdout, one JSON object per line:
 
-  host -> runner  {"type": "init", "tools": ["search", ...]}
+  host -> runner  {"type": "init", "tools": ["search", ...], "catalog": {"search": "<stub>"}}
   runner -> host  {"type": "ready"}
   host -> runner  {"type": "cell", "code": "..."}
   runner -> host  {"type": "call", "id": 1, "method": "search", "params": {...}}
@@ -13,8 +13,9 @@ The host talks to it over stdin and stdout, one JSON object per line:
 
 Each tool is an async function that takes one dict and returns a string, as in Claude's
 programmatic tool calling; calls are served one at a time, and a refused or failed call
-raises ToolError. Globals persist between cells. The host treats every line it reads as
-untrusted, so code that forges a message gains nothing.
+raises ToolError. TOOLS maps each tool's name to its stub and search_tools(query) finds tools
+by word; neither talks to the host. Globals persist between cells. The host treats every line
+it reads as untrusted, so code that forges a message gains nothing.
 """
 
 import ast
@@ -22,6 +23,7 @@ import asyncio
 import io
 import json
 import os
+import re
 import sys
 import traceback
 from contextlib import redirect_stderr, redirect_stdout
@@ -108,6 +110,26 @@ def stub(name: str):
     return call
 
 
+def words(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def searcher(stubs: dict):
+    def search_tools(query: str) -> list[str]:
+        """Names of the tools whose name or stub holds a word of the query, best first: a word
+        scores 2 in the name, else 1 in the stub."""
+        wanted = words(str(query))
+        scored = []
+        for name, stub in stubs.items():
+            in_name, in_stub = words(name), words(stub)
+            score = sum(2 if w in in_name else 1 if w in in_stub else 0 for w in wanted)
+            if score:
+                scored.append((-score, name))
+        return [name for _, name in sorted(scored)]
+
+    return search_tools
+
+
 def run_cell(code: str, scope: dict) -> None:
     out = Capped()
     error = None
@@ -126,7 +148,9 @@ def run_cell(code: str, scope: dict) -> None:
 
 def main() -> None:
     init = receive()
+    stubs = dict(init.get("catalog", {}))
     scope: dict = {"__name__": "__cell__", "ToolError": ToolError}
+    scope["TOOLS"], scope["search_tools"] = dict(stubs), searcher(stubs)
     for name in init.get("tools", []):
         scope[name] = stub(name)
     send({"type": "ready"})

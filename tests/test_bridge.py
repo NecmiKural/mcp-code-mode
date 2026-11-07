@@ -8,7 +8,15 @@ import pytest
 import toy_server
 from mcp.types import Tool as McpTool
 
-from mcp_code_mode.bridge import Bridge, function_name, load_tools, render_stubs
+from mcp_code_mode.bridge import (
+    MAX_DESCRIPTION,
+    Bridge,
+    catalog,
+    function_name,
+    load_tools,
+    render_stubs,
+    render_tools,
+)
 from mcp_code_mode.sandbox import MAX_ERROR, Refused
 
 
@@ -36,6 +44,8 @@ def test_every_tool_gets_a_python_name_and_a_stub(bridge):
         ("class", "class_"),
         ("print", "print_"),
         ("ToolError", "ToolError_"),
+        ("TOOLS", "TOOLS_"),
+        ("search_tools", "search_tools_"),
         ("__builtins__", "__builtins___"),
     ],
 )
@@ -159,3 +169,44 @@ def test_stubs_show_types_and_optional_arguments():
     tools = load_tools([McpTool(name="search", description="Find things.", input_schema=schema)])
     stubs = render_stubs(tools.values())
     assert "params: q: str, tags: list[str] (optional), limit: int | None (optional)" in stubs
+
+
+def test_long_descriptions_are_cut():
+    listed = [McpTool(name="chatty", description="y" * 5000, input_schema={"type": "object"})]
+    assert len(load_tools(listed)["chatty"].description) == MAX_DESCRIPTION
+
+
+def test_the_catalog_holds_each_tools_stub(bridge):
+    stubs = catalog(bridge.tools.values())
+    assert set(stubs) == set(bridge.tools)
+    assert stubs["add"] == render_stubs([bridge.tools["add"]])
+
+
+def test_the_description_falls_back_to_summaries(bridge):
+    tools = bridge.tools.values()
+    full = render_stubs(tools)
+    assert render_tools(tools, len(full)) == full
+    brief = render_tools(tools, len(full) - 1)
+    assert "async def" not in brief
+    assert "add(a, b): Add two integers." in brief.splitlines()
+    assert "7 of 7 tools shown in one line each" in brief
+    cramped = render_tools(tools, 40)
+    assert cramped.splitlines()[0] == "add(a, b): Add two integers."
+    assert "1 of 7 tools shown in one line each" in cramped
+    assert "search_tools(query) finds the rest" in cramped
+    assert render_tools(tools, 0).startswith("0 of 7 tools")
+
+
+def test_summaries_are_one_line_of_at_most_120_characters():
+    listed = [
+        McpTool(
+            name="report",
+            description="Builds the report.\nIt takes a while. " + "z" * 300,
+            input_schema={"type": "object", "properties": {"year": {"type": "integer"}}},
+        ),
+        McpTool(name="long", description="w" * 300, input_schema={"type": "object"}),
+    ]
+    tools = load_tools(listed).values()
+    lines = render_tools(tools, 0 + 200).splitlines()
+    assert lines[0] == "long(): " + "w" * 112
+    assert lines[1] == "report(year): Builds the report."

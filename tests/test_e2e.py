@@ -40,6 +40,7 @@ async def test_the_wrapped_server_becomes_one_tool_listing_its_stubs(image):
     assert "async def add(params: dict) -> str:" in tool.description
     assert "async def get_answer(params: dict) -> str:" in tool.description
     assert "wipe" not in tool.description
+    assert "search_tools(query)" in tool.description and "TOOLS[name]" in tool.description
 
 
 async def test_code_calls_the_tools_through_the_bridge(image):
@@ -54,7 +55,8 @@ print(sorted(name for name in globals() if not name.startswith('__')))
     assert out["error"] is None and not out["stopped"]
     assert out["stdout"].splitlines() == [
         "[10, 11, 12] hi 42",
-        "['ToolError', 'add', 'asyncio', 'echo', 'get_answer', 'json', 'sums']",
+        "['TOOLS', 'ToolError', 'add', 'asyncio', 'echo', 'get_answer', 'json', 'search_tools',"
+        " 'sums']",
     ]
 
 

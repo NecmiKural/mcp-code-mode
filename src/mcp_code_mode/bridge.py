@@ -33,6 +33,10 @@ MAX_ARG_CHARS = 16 * 1024
 MAX_RESULT_CHARS = 64 * 1024
 MAX_CALLS = 200  # tool calls per run
 CALL_TIMEOUT_S = 30.0
+MAX_DESCRIPTION = 2048  # characters kept of each tool description: they are untrusted
+INLINE_BUDGET = 12_000  # characters of stubs in the run_python description
+MAX_SUMMARY = 120
+RESERVED = {"ToolError", "TOOLS", "search_tools"}  # names the runner defines
 TYPES = {
     "string": "str",
     "integer": "int",
@@ -57,12 +61,12 @@ class Tool:
 
 def function_name(name: str) -> str:
     """A Python identifier for an MCP tool name: get-weather becomes get_weather. A name that
-    would shadow a keyword, a builtin, a dunder such as __builtins__ or ToolError gets a
-    trailing underscore."""
+    would shadow a keyword, a builtin, a dunder such as __builtins__ or a name the runner
+    defines (ToolError, TOOLS, search_tools) gets a trailing underscore."""
     ident = re.sub(r"\W", "_", name, flags=re.ASCII)
     if not ident or ident[0].isdigit():
         ident = "_" + ident
-    shadows = keyword.iskeyword(ident) or ident in vars(builtins) or ident == "ToolError"
+    shadows = keyword.iskeyword(ident) or ident in vars(builtins) or ident in RESERVED
     if shadows or ident.startswith("__"):
         ident += "_"
     return ident
@@ -94,7 +98,8 @@ def load_tools(listed: Iterable[Any], allow: Iterable[str] | None = None) -> dic
         if function in tools:
             log.warning("left out %s: %s is taken by %s", spec.name, function, tools[function].name)
             continue
-        tools[function] = Tool(spec.name, function, spec.description or "", schema, checker(schema))
+        description = (spec.description or "")[:MAX_DESCRIPTION]
+        tools[function] = Tool(spec.name, function, description, schema, checker(schema))
     if wanted is not None and (missing := sorted(wanted - seen)):
         raise ValueError(f"not tools of the wrapped server: {missing}")
     return tools
@@ -113,20 +118,54 @@ def _type(prop: Any) -> str:
     return TYPES.get(kind, "Any") if isinstance(kind, str) else "Any"
 
 
+def render_stub(tool: Tool) -> str:
+    """One tool as a Python stub for the model to read: it takes one dict of the arguments its
+    input schema names and returns a string."""
+    schema = tool.input_schema
+    required = set(schema.get("required", []))
+    params = ", ".join(
+        f"{name}: {_type(prop)}{'' if name in required else ' (optional)'}"
+        for name, prop in schema.get("properties", {}).items()
+    )
+    doc = textwrap.indent(f"{tool.description.strip()}\n\nparams: {params or 'none'}", "    ")
+    return f'async def {tool.function}(params: dict) -> str:\n    """\n{doc}\n    """'
+
+
 def render_stubs(tools: Iterable[Tool]) -> str:
-    """The tools as Python stubs for the model to read: each takes one dict of the arguments
-    its input schema names and returns a string."""
-    blocks = []
-    for tool in tools:
-        schema = tool.input_schema
-        required = set(schema.get("required", []))
-        params = ", ".join(
-            f"{name}: {_type(prop)}{'' if name in required else ' (optional)'}"
-            for name, prop in schema.get("properties", {}).items()
-        )
-        doc = textwrap.indent(f"{tool.description.strip()}\n\nparams: {params or 'none'}", "    ")
-        blocks.append(f'async def {tool.function}(params: dict) -> str:\n    """\n{doc}\n    """')
-    return "\n\n".join(blocks)
+    return "\n\n".join(render_stub(tool) for tool in tools)
+
+
+def catalog(tools: Iterable[Tool]) -> dict[str, str]:
+    """Each tool's stub by Python name, for TOOLS and search_tools inside the sandbox."""
+    return {tool.function: render_stub(tool) for tool in tools}
+
+
+def summary(tool: Tool) -> str:
+    """One line: the name, the argument names and the description's first sentence."""
+    first = re.split(r"\. |\n", tool.description.strip(), maxsplit=1)[0]
+    params = ", ".join(tool.input_schema.get("properties", {}))
+    return f"{tool.function}({params}): {first}"[:MAX_SUMMARY]
+
+
+def render_tools(tools: Iterable[Tool], budget: int = INLINE_BUDGET) -> str:
+    """The tools for the run_python description: every stub when they fit `budget`
+    characters, else one summary line per tool, by name, while they fit."""
+    tools = list(tools)
+    if len(full := render_stubs(tools)) <= budget:
+        return full
+    lines: list[str] = []
+    used = 0
+    for line in sorted(summary(tool) for tool in tools):
+        used += len(line) + (1 if lines else 0)
+        if used > budget:
+            break
+        lines.append(line)
+    rest = "search_tools(query) finds the rest and " if len(lines) < len(tools) else ""
+    lines.append(
+        f"{len(lines)} of {len(tools)} tools shown in one line each; "
+        f"{rest}TOOLS[name] shows a stub."
+    )
+    return "\n".join(lines)
 
 
 def _text(result: Any) -> str:
