@@ -16,6 +16,20 @@ It takes any server's tools from `tools/list`, turns each into an async Python f
 
 This is the code-mode machinery of [bank-reconciliation-agent](https://github.com/NecmiKural/bank-reconciliation-agent), without anything specific to bank reconciliation. There it ran in a pre-registered experiment ([design](https://github.com/NecmiKural/bank-reconciliation-agent/blob/main/docs/code-mode-experiment.md), [results](https://github.com/NecmiKural/bank-reconciliation-agent#code-mode)): containment held in every run and every probe, and code mode was cheaper on average, but the pre-registered efficiency hypothesis failed for both models tested. Read the numbers there; this package carries no measurements of its own.
 
+## Related work
+
+Code mode is not new. These do the same job in other places, as their documentation described them on 8 November 2026:
+
+| | The model writes | The code runs in |
+|---|---|---|
+| [Cloudflare Code Mode](https://blog.cloudflare.com/code-mode/) (September 2025) | TypeScript | A fresh V8 isolate on Workers, made per run through the Worker Loader API. `fetch()` and `connect()` throw; tools are bindings, and the keys stay with the supervisor |
+| [Claude programmatic tool calling](https://platform.claude.com/docs/en/agents-and-tools/tool-use/programmatic-tool-calling) | Python | Anthropic's code execution container. A tool opts in with `allowed_callers` |
+| [OpenAI programmatic tool calling](https://developers.openai.com/api/docs/guides/tools-programmatic-tool-calling) | JavaScript | A V8 runtime hosted by OpenAI. A tool opts in with `allowed_callers` |
+| [goose Code Mode](https://goose-docs.ai/docs/mcp/code-mode-mcp/) | JavaScript | A Boa context inside goose |
+| [pi codemode](https://pi.dev/docs/latest/codemode) | JavaScript | A QuickJS worker inside pi, with `searchTools` and `describeTool` to find tools |
+
+What this package does differently: the model writes Python, the code runs in a container on your own machine, any MCP client can use it as an ordinary MCP server, and every call passes a bridge on the host whose checks each have a test (see [Threat model](#threat-model)). It claims no stronger isolation than the hosted runtimes; [What it does not protect](#what-it-does-not-protect) says where it ends.
+
 ## Quick start
 
 Needs Python 3.13, [uv](https://docs.astral.sh/uv/) and Docker.
