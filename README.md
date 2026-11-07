@@ -55,7 +55,7 @@ Point an MCP client at `mcp-code-mode serve`. Everything after `--` is the wrapp
 }
 ```
 
-`env` is only needed when Docker is not at its default socket (Rancher Desktop, Colima). The client then lists one tool, `run_python`, whose description carries a stub per wrapped tool:
+`env` is only needed when Docker is not at its default socket (Rancher Desktop, Colima). The client then lists one tool, `run_python`, whose description carries a stub per wrapped tool (while they fit; see [Finding tools](#finding-tools)):
 
 ```python
 async def add(params: dict) -> str:
@@ -77,7 +77,47 @@ print([json.loads(s)["sum"] for s in sums])
 
 It comes back as `{"stdout": "[10, 11, 12]\n", "error": null, "truncated": false, "stopped": false}`.
 
-Options for `serve`: `--allow TOOL` (repeatable; default all tools), `--env NAME` (pass that variable from this environment to the wrapped server; repeatable), `--image`, `--deadline` in seconds per run, and `--max-calls` per run.
+Options for `serve`: `--allow TOOL` (repeatable; default all tools), `--private TOOL` (repeatable; see [Private data](#private-data)), `--env NAME` (pass that variable from this environment to the wrapped server; repeatable), `--config FILE` (several servers, instead of the options before it and the command), `--image`, `--deadline` in seconds per run, and `--max-calls` per run.
+
+## Finding tools
+
+The description carries every stub while they fit 12,000 characters. Past that it lists one line per tool, by name, while they fit, and says how many it left out:
+
+```
+add(a, b): Add two integers.
+create_issue(title, body) [private]: File an issue in the team tracker.
+2 of 80 tools shown in one line each; search_tools(query) finds the rest and TOOLS[name] shows a stub.
+```
+
+Inside the code, `TOOLS` maps each tool's name to its stub, and `search_tools(query)` lists the tools whose name or stub holds a word of the query, best first (a word scores 2 in the name, 1 in the stub). Both work on the tool list fetched at startup: they never reach a wrapped server and use none of the run's calls. Tool descriptions from the server are cut at 2 KiB.
+
+```python
+print(search_tools("issue"))
+print(TOOLS["create_issue"])
+```
+
+## Several servers
+
+`serve --config FILE` wraps every server in a file of the `mcpServers` shape MCP clients already use. Entries are stdio servers: `command`, `args` and `env` as usual (values passed as written; `${VAR}` is not expanded), plus `allow` and `private` per server. `type: "stdio"` is accepted; `url`, `headers` and any other key stop startup with the entry and the key named, rather than being half supported.
+
+```json
+{
+  "mcpServers": {
+    "notes":   {"command": "uv", "args": ["run", "notes-server"], "allow": ["search"], "private": true},
+    "tracker": {"command": "tracker-mcp", "allow": ["create_issue", "find_issue"], "private": ["create_issue"]}
+  }
+}
+```
+
+Each tool is called by its server's name and its own: `await notes__search({"query": "salary"})`. One call budget covers a run across every server. Two tools that would get the same name stop startup, and a server that fails to start closes the ones already open.
+
+## Private data
+
+Joining servers opens a path one server alone does not have: code reads private data from one tool and hands it to another, whose server then holds it or sends it on. `--private TOOL`, or `private` in a config entry (`true` for every tool of that server), marks the tools that may see private data: their results may hold some, and their arguments may carry some to their server.
+
+From the first call to a private tool on, only private tools can be called, on every server, until mcp-code-mode exits. Any other tool, labelled or not, is refused with a `ToolError` that says why. The rule lasts for the process, not the run, because what one run printed is in the model's context and the next run can be written from it. Over stdio the process lives as long as the client's connection; restarting a wrapped server does not reset it.
+
+In the config above, the code can read notes and file an issue in the team tracker, but once it has read a note it can no longer call `find_issue`, whose server could pass on its query. Mark a tool private only if its server may hold the data; the rule is only as good as the labels. Private stubs and summary lines say so, so the model knows before it is refused.
 
 ## Python API
 
@@ -97,6 +137,8 @@ with Bridge(toy, allow=["add", "echo"]) as bridge:
     print(cell.stdout)  # {"sum": 5}
 ```
 
+`Servers(load_config("servers.json"))`, or `Servers({"name": Entry(server, allow, private)})`, offers the same `tools`, `stubs()`, `call()` and `budget()` over several servers, and `run_code` and `build_server` take either.
+
 For your own agent loop, with variables kept between cells, hold one `Sandbox` and pass `bridge.budget(n)` as each cell's `on_call`. `build_server(bridge)` returns the `run_python` server without starting it.
 
 ## Agent skill
@@ -105,9 +147,9 @@ For your own agent loop, with variables kept between cells, hold one `Sandbox` a
 
 ## How a call works
 
-1. `run_python` starts a fresh container holding Python and `runner.py`, nothing else. Each wrapped tool is an async function in the code's globals. MCP names that are not Python identifiers are renamed (`get-weather` becomes `get_weather`), and a name that would shadow a keyword, a builtin or a dunder such as `__builtins__` gets a trailing underscore.
+1. `run_python` starts a fresh container holding Python and `runner.py`, nothing else. Each wrapped tool is an async function in the code's globals. MCP names that are not Python identifiers are renamed (`get-weather` becomes `get_weather`), and a name that would shadow a keyword, a builtin, a dunder such as `__builtins__` or a name the runner defines (`ToolError`, `TOOLS`, `search_tools`) gets a trailing underscore. With `--config`, each name starts with its server's.
 2. A tool call writes one JSON line to the runner's private copy of stdout. The host reads it as untrusted: if it is too long, not JSON or not a known shape, the run ends as a protocol violation.
-3. The bridge checks the call: the tool is on the allowlist, the arguments are an object of at most 16 KiB that validates against the tool's input schema (arguments the schema does not name are refused unless it allows them), and the run has calls left. Only then does it call the wrapped server, with a 30 second timeout.
+3. The bridge checks the call: the tool is on the allowlist, the arguments are an object of at most 16 KiB that validates against the tool's input schema (arguments the schema does not name are refused unless it allows them), and the run has calls left. If a private tool has been called before, the tool must be private too. Only then does it call the wrapped server, with a 30 second timeout.
 4. The result goes back to the code as a string: the structured content as JSON, else the text. A result over 64 KiB is refused, not cut. A refused or failed call raises `ToolError` in the code, with a message of at most 500 characters; a fault on the host side reaches the code only as an exception type name.
 5. The run ends when the code finishes, at the deadline (90 seconds), or on a protocol violation. Only what the code printed comes back, at most 8 KiB, with the last lines of a traceback if it failed.
 
@@ -120,6 +162,7 @@ The code is written by a model that may be confused or steered by text it read, 
 - **The host:** its files, environment variables, credentials, network position and resources.
 - **The wrapped server:** from calls outside the allowlist, malformed or oversized arguments, and call floods.
 - **The model's context:** from runaway output.
+- **Private data:** from reaching a tool that is not marked private, once a private tool has been called.
 
 ### Controls
 
@@ -136,6 +179,13 @@ The code is written by a model that may be confused or steered by text it read, 
 | Code loops on a tool, or a tool hangs | 200 calls per run, 30 seconds per call | `test_a_run_has_a_fixed_budget_of_calls`, `test_a_slow_tool_times_out_and_the_session_survives`, `test_refusals_reach_the_code_and_the_budget_holds` |
 | A tool returns a huge result | Refused over 64 KiB | `test_oversized_results_are_refused_not_cut` |
 | Host details leak through errors | Only the bridge's own refusal messages reach the code, capped at 500 characters; any other exception only by its type name | `test_a_host_fault_raises_in_the_cell_without_its_details` |
+| Code carries private data to a tool that can send it on | After the first private call, every tool that is not private is refused, on every server, until the process exits; a call refused by its schema starts nothing, one that fails after going out still does | `test_only_private_tools_after_a_private_call`, `test_a_refused_private_call_does_not_taint`, `test_a_failed_private_call_still_taints`, `test_the_taint_lasts_for_the_process`, `test_private_on_one_server_refuses_another`, `test_after_a_private_call_only_private_tools_work_in_any_later_run` |
+| A label quietly misses its tool | A private label on a tool that was not kept (a typo, a bad schema, a name taken) stops startup | `test_labels_must_name_kept_tools` |
+| A server stuffs the description or the search | Descriptions cut at 2 KiB; stubs shown only within 12,000 characters, else one line per tool | `test_long_descriptions_are_cut`, `test_the_description_falls_back_to_summaries` |
+| Discovery reaches a server or spends calls | `TOOLS` and `search_tools` run in the sandbox over the catalog sent at start | `test_discovery_never_reaches_the_server` |
+| A config option is half supported | Only stdio entries; unknown keys, `url` and `headers` stop startup by name; `--config` excludes the single-server options | `test_config_errors_name_the_entry_and_key`, `test_config_excludes_single_server_options` |
+| Two servers collide, or one fails to start | A name both would produce stops startup; a failing server closes the ones already open | `test_a_name_clash_across_servers_stops_startup`, `test_a_failing_entry_closes_the_others` |
+| A config's `env` reaches the code | It goes to that wrapped server's process only | `test_config_serves_two_servers_and_their_env_stays_on_the_host` |
 
 The tests that need Docker skip locally without it and fail under CI, where the image is built first.
 
@@ -149,6 +199,11 @@ The tests that need Docker skip locally without it and fail under CI, where the 
 - **Whoever runs `mcp-code-mode` can run `docker`,** which on Linux is equivalent to root. The process itself is trusted.
 - **The base image is pinned by tag, not by digest,** and the resource limits are fixed in `sandbox.py`.
 - **Side channels remain:** code can time things and read CPU and kernel details inside the container.
+- **The private-data rule is only as good as its labels.** A tool marked private whose server sends data on defeats it. Unlabelled tools are refused after a private call, so a missing label costs availability, not data.
+- **Private data also arrives without a call.** Private servers' descriptions and schemas (enums, examples) are in the description and in `TOOLS`, and nothing starts the rule on them.
+- **The rule assumes `run_python` is the model's only outlet.** What a run prints (up to 8 KiB) reaches the model, which may hold other tools in its client.
+- **One private call blocks every other tool until restart,** even one an injected description talked the model into. That availability is lost on purpose. Asking the user through MCP elicitation, where the client supports it, is the upgrade path.
+- **Confidentiality only.** A result from an untrusted tool can still steer a later write.
 
 ## Development
 

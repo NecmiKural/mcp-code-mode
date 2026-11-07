@@ -143,3 +143,13 @@ Quality gates on the changed code: `crapper`, `dryer` and `mutator`.
 2. `Flow`, labels and `--private` with one server, with tests.
 3. `Servers`, config and `--config`, with tests.
 4. README, skill, quality gates; then the owner decides on v0.2.0.
+
+## 7. As built (8 November 2026)
+
+Where the code differs from the sections above:
+
+- The catalog holds each tool's stub only: summaries are used on the host, for the description, and the runner never needs them.
+- `serve -- COMMAND` keeps using a `Bridge`; `run_code` and `build_server` take a `Bridge` or a `Servers`, which offer the same `tools` and `budget()`. Moving single-server mode onto a one-entry `Servers` bought nothing.
+- `test_admit_is_atomic` was dropped: a thread race cannot tell a correct lock from a lucky schedule. `Flow.admit` does its check and its update under one lock, and the reviews read it that way.
+- A failing server's name travels as an exception note (`in server 'bad'`) on the original error, so its type is kept.
+- Quality gates on the changed host code: CRAP at most 9.1 for every function changed here (the unchanged `Sandbox.run` stays at 15.6); no duplicates; 51 of 51 covered mutants of `bridge.py` and `servers.py` killed. `runner.py` runs inside the container, where coverage is not measured; the Docker tests cover it.
