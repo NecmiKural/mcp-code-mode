@@ -77,12 +77,14 @@ def load_tools(
     listed: Iterable[Any],
     allow: Iterable[str] | None = None,
     private: Iterable[str] | bool = (),
+    prefix: str | None = None,
 ) -> dict[str, Tool]:
     """The wrapped server's tools by Python name, only those on the allowlist (None allows
     all), with the tools named in `private` (True for all) marked private. A tool whose input
     schema is not valid JSON Schema, or whose Python name an earlier tool already took, is left
     out: a call to it could not be checked or named. A private label on a tool that was not
-    kept is an error, so a typo cannot quietly switch the rule off."""
+    kept is an error, so a typo cannot quietly switch the rule off. With a prefix, a tool
+    `search` of server `notes` is called `notes__search`."""
     wanted = None if allow is None else set(allow)
     labelled = set() if isinstance(private, bool) else set(private)
     tools: dict[str, Tool] = {}
@@ -91,7 +93,7 @@ def load_tools(
         seen.add(spec.name)
         if wanted is not None and spec.name not in wanted:
             continue
-        function = function_name(spec.name)
+        function = function_name(f"{prefix}__{spec.name}" if prefix else spec.name)
         schema = dict(spec.input_schema)
         # NOTE: arguments the schema does not name are refused unless it says otherwise; a
         # server that quietly ignores extras would otherwise receive whatever the code adds.
@@ -229,13 +231,14 @@ class Bridge:
         allow: Iterable[str] | None = None,
         private: Iterable[str] | bool = (),
         *,
+        prefix: str | None = None,
         flow: Flow | None = None,
         max_arg_chars: int = MAX_ARG_CHARS,
         max_result_chars: int = MAX_RESULT_CHARS,
         call_timeout_s: float = CALL_TIMEOUT_S,
     ) -> None:
         self.server, self.allow, self.private = server, allow, private
-        self.flow = flow or Flow()
+        self.prefix, self.flow = prefix, flow or Flow()
         self.max_arg_chars, self.max_result_chars = max_arg_chars, max_result_chars
         self.call_timeout_s = call_timeout_s
         self.tools: dict[str, Tool] = {}
@@ -256,7 +259,7 @@ class Bridge:
             self._stop()
             raise
         try:
-            self.tools = load_tools(listed, self.allow, self.private)
+            self.tools = load_tools(listed, self.allow, self.private, self.prefix)
         except BaseException:
             self.__exit__()
             raise
@@ -354,13 +357,19 @@ class Bridge:
 
     def budget(self, max_calls: int = MAX_CALLS) -> Callable[[str, Any], str]:
         """An on_call for one run: the bridge's checks, plus at most max_calls calls."""
-        calls = 0
+        return count_calls(self.call, max_calls)
 
-        def on_call(function: str, params: Any) -> str:
-            nonlocal calls
-            calls += 1
-            if calls > max_calls:
-                raise Refused(f"at most {max_calls} tool calls per run")
-            return self.call(function, params)
 
-        return on_call
+def count_calls(call: Callable[[str, Any], str], max_calls: int) -> Callable[[str, Any], str]:
+    """An on_call for one run that refuses every call after the first max_calls, refused ones
+    included."""
+    calls = 0
+
+    def on_call(function: str, params: Any) -> str:
+        nonlocal calls
+        calls += 1
+        if calls > max_calls:
+            raise Refused(f"at most {max_calls} tool calls per run")
+        return call(function, params)
+
+    return on_call

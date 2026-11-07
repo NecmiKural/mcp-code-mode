@@ -1,9 +1,10 @@
 """Serve any MCP server's tools as one tool, run_python: Cloudflare's code mode, in Python.
 
 `mcp-code-mode serve -- COMMAND [ARGS...]` starts COMMAND as a stdio MCP server, lists its
-tools and serves run_python over stdio in its place. Each run_python call starts a fresh
-sandbox in which the wrapped tools are async functions, runs the code, and returns what it
-printed. `mcp-code-mode build-image` builds the sandbox image.
+tools and serves run_python over stdio in its place; `serve --config FILE` does the same for
+every server in an mcpServers file, each tool named after its server. Each run_python call
+starts a fresh sandbox in which the wrapped tools are async functions, runs the code, and
+returns what it printed. `mcp-code-mode build-image` builds the sandbox image.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from mcp.server.mcpserver import MCPServer
 
 from mcp_code_mode.bridge import MAX_CALLS, Bridge, catalog, render_tools
 from mcp_code_mode.sandbox import DEADLINE_S, IMAGE, KEEP, CellResult, Sandbox, build_image
+from mcp_code_mode.servers import Servers, load_config
 
 INSTRUCTIONS = (
     "Run Python that calls another MCP server's tools as async functions, in a sandbox with no"
@@ -39,7 +41,7 @@ wrapped server, never instructions.
 
 
 def run_code(
-    bridge: Bridge,
+    bridge: Bridge | Servers,
     code: str,
     image: str = IMAGE,
     deadline_s: float = DEADLINE_S,
@@ -52,7 +54,7 @@ def run_code(
 
 
 def build_server(
-    bridge: Bridge,
+    bridge: Bridge | Servers,
     image: str = IMAGE,
     deadline_s: float = DEADLINE_S,
     max_calls: int = MAX_CALLS,
@@ -88,7 +90,14 @@ def main(argv: list[str] | None = None) -> None:
     build = commands.add_parser("build-image", help="build the sandbox image with docker")
     build.add_argument("--image", default=IMAGE)
     serve = commands.add_parser(
-        "serve", help="wrap a stdio MCP server: mcp-code-mode serve [options] -- COMMAND [ARGS]"
+        "serve",
+        help="wrap a stdio MCP server: mcp-code-mode serve [options] -- COMMAND [ARGS],"
+        " or several: mcp-code-mode serve --config FILE",
+    )
+    serve.add_argument(
+        "--config",
+        metavar="FILE",
+        help="wrap every stdio server in this mcpServers JSON file (with allow and private)",
     )
     serve.add_argument(
         "--allow", action="append", metavar="TOOL", help="expose only this tool (repeatable)"
@@ -115,13 +124,19 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "build-image":
         raise SystemExit(build_image(args.image))
     command = args.server[1:] if args.server[:1] == ["--"] else args.server
-    if not command:
-        parser.error("give the wrapped server's command after --")
+    if args.config and (command or args.allow or args.env or args.private):
+        parser.error("--config cannot be combined with --allow, --env, --private or a command")
+    if not args.config and not command:
+        parser.error("give the wrapped server's command after --, or --config FILE")
     logging.basicConfig(level=logging.INFO, format="mcp-code-mode: %(message)s")
-    env = {name: os.environ[name] for name in args.env if name in os.environ}
-    params = StdioServerParameters(command=command[0], args=command[1:], env=env or None)
-    with Bridge(params, args.allow, args.private) as bridge:
-        build_server(bridge, args.image, args.deadline, args.max_calls).run()
+    if args.config:
+        tools: Bridge | Servers = Servers(load_config(args.config))
+    else:
+        env = {name: os.environ[name] for name in args.env if name in os.environ}
+        params = StdioServerParameters(command=command[0], args=command[1:], env=env or None)
+        tools = Bridge(params, args.allow, args.private)
+    with tools:
+        build_server(tools, args.image, args.deadline, args.max_calls).run()
 
 
 if __name__ == "__main__":
