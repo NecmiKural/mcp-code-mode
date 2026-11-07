@@ -81,7 +81,7 @@ def build_server(
     return server
 
 
-def main(argv: list[str] | None = None) -> None:
+def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mcp-code-mode",
         description="Serve an MCP server's tools as one run_python tool backed by a sandbox.",
@@ -120,21 +120,30 @@ def main(argv: list[str] | None = None) -> None:
     serve.add_argument("--deadline", type=float, default=DEADLINE_S, help="seconds per run")
     serve.add_argument("--max-calls", type=int, default=MAX_CALLS, help="tool calls per run")
     serve.add_argument("server", nargs=argparse.REMAINDER, help="the wrapped server's command")
+    return parser
+
+
+def open_tools(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Bridge | Servers:
+    """The bridge or servers `serve` wraps, not yet started."""
+    command = args.server[1:] if args.server[:1] == ["--"] else args.server
+    if args.config:
+        if any((command, args.allow, args.env, args.private)):
+            parser.error("--config cannot be combined with --allow, --env, --private or a command")
+        return Servers(load_config(args.config))
+    if not command:
+        parser.error("give the wrapped server's command after --, or --config FILE")
+    env = {name: os.environ[name] for name in args.env if name in os.environ}
+    params = StdioServerParameters(command=command[0], args=command[1:], env=env or None)
+    return Bridge(params, args.allow, args.private)
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = make_parser()
     args = parser.parse_args(argv)
     if args.command == "build-image":
         raise SystemExit(build_image(args.image))
-    command = args.server[1:] if args.server[:1] == ["--"] else args.server
-    if args.config and (command or args.allow or args.env or args.private):
-        parser.error("--config cannot be combined with --allow, --env, --private or a command")
-    if not args.config and not command:
-        parser.error("give the wrapped server's command after --, or --config FILE")
+    tools = open_tools(args, parser)
     logging.basicConfig(level=logging.INFO, format="mcp-code-mode: %(message)s")
-    if args.config:
-        tools: Bridge | Servers = Servers(load_config(args.config))
-    else:
-        env = {name: os.environ[name] for name in args.env if name in os.environ}
-        params = StdioServerParameters(command=command[0], args=command[1:], env=env or None)
-        tools = Bridge(params, args.allow, args.private)
     with tools:
         build_server(tools, args.image, args.deadline, args.max_calls).run()
 

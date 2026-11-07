@@ -85,39 +85,48 @@ def load_tools(
     out: a call to it could not be checked or named. A private label on a tool that was not
     kept is an error, so a typo cannot quietly switch the rule off. With a prefix, a tool
     `search` of server `notes` is called `notes__search`."""
-    wanted = None if allow is None else set(allow)
-    labelled = set() if isinstance(private, bool) else set(private)
+    listed = list(listed)
+    names = {spec.name for spec in listed}
+    wanted = names if allow is None else set(allow)
+    labelled = names if private is True else set(private or ())
     tools: dict[str, Tool] = {}
-    seen = set()
     for spec in listed:
-        seen.add(spec.name)
-        if wanted is not None and spec.name not in wanted:
-            continue
-        function = function_name(f"{prefix}__{spec.name}" if prefix else spec.name)
-        schema = dict(spec.input_schema)
-        # NOTE: arguments the schema does not name are refused unless it says otherwise; a
-        # server that quietly ignores extras would otherwise receive whatever the code adds.
-        if "properties" in schema:
-            schema = {"additionalProperties": False, **schema}
-        checker = validators.validator_for(schema)
-        try:
-            checker.check_schema(schema)
-        except exceptions.SchemaError:
-            log.warning("left out %s: its input schema is not valid JSON Schema", spec.name)
-            continue
-        if function in tools:
-            log.warning("left out %s: %s is taken by %s", spec.name, function, tools[function].name)
-            continue
-        description = (spec.description or "")[:MAX_DESCRIPTION]
-        is_private = private is True or spec.name in labelled
-        tools[function] = Tool(
-            spec.name, function, description, schema, checker(schema), is_private
-        )
-    if wanted is not None and (missing := sorted(wanted - seen)):
-        raise ValueError(f"not tools of the wrapped server: {missing}")
-    if lost := sorted(labelled - {tool.name for tool in tools.values()}):
-        raise ValueError(f"labelled private but not tools this bridge kept: {lost}")
+        if spec.name in wanted and (tool := _tool(spec, prefix, spec.name in labelled)):
+            _keep(tools, tool)
+    _require(wanted, names, "not tools of the wrapped server")
+    kept = {tool.name for tool in tools.values()}
+    _require(labelled, kept, "labelled private but not tools this bridge kept")
     return tools
+
+
+def _tool(spec: Any, prefix: str | None, private: bool) -> Tool | None:
+    """One listed tool, or None when its input schema is not valid JSON Schema."""
+    schema = dict(spec.input_schema)
+    # NOTE: arguments the schema does not name are refused unless it says otherwise; a
+    # server that quietly ignores extras would otherwise receive whatever the code adds.
+    if "properties" in schema:
+        schema = {"additionalProperties": False, **schema}
+    checker = validators.validator_for(schema)
+    try:
+        checker.check_schema(schema)
+    except exceptions.SchemaError:
+        log.warning("left out %s: its input schema is not valid JSON Schema", spec.name)
+        return None
+    function = function_name(f"{prefix}__{spec.name}" if prefix else spec.name)
+    description = (spec.description or "")[:MAX_DESCRIPTION]
+    return Tool(spec.name, function, description, schema, checker(schema), private)
+
+
+def _keep(tools: dict[str, Tool], tool: Tool) -> None:
+    if (taken := tools.get(tool.function)) is not None:
+        log.warning("left out %s: %s is taken by %s", tool.name, tool.function, taken.name)
+        return
+    tools[tool.function] = tool
+
+
+def _require(names: set[str], found: set[str], problem: str) -> None:
+    if missing := sorted(names - found):
+        raise ValueError(f"{problem}: {missing}")
 
 
 def _type(prop: Any) -> str:

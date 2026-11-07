@@ -10,7 +10,7 @@ import toy_server
 
 from mcp_code_mode.bridge import Bridge
 from mcp_code_mode.sandbox import Refused
-from mcp_code_mode.server import main
+from mcp_code_mode.server import main, make_parser, open_tools
 from mcp_code_mode.servers import Entry, Servers, load_config
 
 
@@ -142,3 +142,17 @@ def test_config_excludes_single_server_options(tmp_path, capsys, extra):
     with pytest.raises(SystemExit):
         main(["serve", "--config", path, *extra])
     assert "--config cannot be combined" in capsys.readouterr().err
+
+
+def test_serve_wraps_a_command_or_a_config(tmp_path, capsys):
+    parser = make_parser()
+    args = parser.parse_args(["serve", "--allow", "add", "--private", "add", "--", "toy", "-x"])
+    single = open_tools(args, parser)
+    assert isinstance(single, Bridge) and single.allow == ["add"] and single.private == ["add"]
+    assert single.server.command == "toy" and single.server.args == ["-x"]
+    path = write(tmp_path, {"toy": {"command": "toy-server"}})
+    several = open_tools(parser.parse_args(["serve", "--config", path]), parser)
+    assert isinstance(several, Servers) and list(several.entries) == ["toy"]
+    with pytest.raises(SystemExit):
+        open_tools(parser.parse_args(["serve"]), parser)
+    assert "--config FILE" in capsys.readouterr().err

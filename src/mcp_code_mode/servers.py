@@ -20,8 +20,6 @@ from mcp import StdioServerParameters
 from mcp_code_mode.bridge import MAX_CALLS, Bridge, Flow, Tool, count_calls, render_stubs
 from mcp_code_mode.sandbox import Refused
 
-KEYS = {"type", "command", "args", "env", "allow", "private"}
-
 
 @dataclass(frozen=True)
 class Entry:
@@ -34,33 +32,40 @@ def _strings(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(v, str) for v in value)
 
 
-def _entry(name: str, raw: Any) -> Entry:
-    def fail(problem: str) -> ValueError:
-        return ValueError(f"server {name!r}: {problem}")
+def _env(value: Any) -> bool:
+    return isinstance(value, dict) and all(isinstance(v, str) for v in value.values())
 
+
+# Each key an entry may have, the check its value must pass, and the message when it fails.
+CHECKS: dict[str, tuple[Callable[[Any], bool], str]] = {
+    "command": (lambda v: isinstance(v, str) and bool(v), "'command' is required"),
+    "type": (lambda v: v == "stdio", "'type' must be 'stdio'"),
+    "args": (_strings, "'args' must be a list of strings"),
+    "env": (_env, "'env' must map strings to strings"),  # passed as written: no ${VAR}
+    "allow": (_strings, "'allow' must be a list of strings"),
+    "private": (
+        lambda v: isinstance(v, bool) or _strings(v),
+        "'private' must be true, false or a list of tool names",
+    ),
+}
+
+
+def _entry(name: str, raw: Any) -> Entry:
     if not isinstance(raw, dict):
-        raise fail("must be an object")
-    if extra := sorted(set(raw) - KEYS):
-        raise fail(
-            f"{extra[0]!r} is not supported; an entry is a stdio server with command, args,"
-            " env, allow and private"
+        raise ValueError(f"server {name!r}: must be an object")
+    if extra := sorted(set(raw) - set(CHECKS)):
+        raise ValueError(
+            f"server {name!r}: {extra[0]!r} is not supported; an entry is a stdio server with"
+            " command, args, env, allow and private"
         )
-    if raw.get("type", "stdio") != "stdio":
-        raise fail("'type' must be 'stdio'")
-    if not isinstance(command := raw.get("command"), str) or not command:
-        raise fail("'command' is required")
-    args, env = raw.get("args", []), raw.get("env", {})
-    if not _strings(args):
-        raise fail("'args' must be a list of strings")
-    if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
-        raise fail("'env' must map strings to strings")  # passed as written: no ${VAR}
-    allow, private = raw.get("allow"), raw.get("private", ())
-    if allow is not None and not _strings(allow):
-        raise fail("'allow' must be a list of strings")
-    if not isinstance(private, bool | tuple) and not _strings(private):
-        raise fail("'private' must be true, false or a list of tool names")
-    params = StdioServerParameters(command=command, args=args, env=env or None)
-    return Entry(params, allow, private)
+    for key, value in {"command": None, **raw}.items():  # a missing command fails its check
+        passes, problem = CHECKS[key]
+        if not passes(value):
+            raise ValueError(f"server {name!r}: {problem}")
+    params = StdioServerParameters(
+        command=raw["command"], args=raw.get("args", []), env=raw.get("env") or None
+    )
+    return Entry(params, raw.get("allow"), raw.get("private", ()))
 
 
 def load_config(path: str) -> dict[str, Entry]:
