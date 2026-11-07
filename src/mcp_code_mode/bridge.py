@@ -36,6 +36,8 @@ CALL_TIMEOUT_S = 30.0
 MAX_DESCRIPTION = 2048  # characters kept of each tool description: they are untrusted
 INLINE_BUDGET = 12_000  # characters of stubs in the run_python description
 MAX_SUMMARY = 120
+MAX_DEPTH = 4  # levels of a schema shown in a stub type; deeper is Any
+MAX_PARAM = 64  # characters shown of a parameter name
 RESERVED = {"ToolError", "TOOLS", "search_tools"}  # names the runner defines
 TYPES = {
     "string": "str",
@@ -109,7 +111,7 @@ def _tool(spec: Any, prefix: str | None, private: bool) -> Tool | None:
     checker = validators.validator_for(schema)
     try:
         checker.check_schema(schema)
-    except exceptions.SchemaError:
+    except (exceptions.SchemaError, RecursionError):  # a server can nest without end
         log.warning("left out %s: its input schema is not valid JSON Schema", spec.name)
         return None
     function = function_name(f"{prefix}__{spec.name}" if prefix else spec.name)
@@ -129,17 +131,23 @@ def _require(names: set[str], found: set[str], problem: str) -> None:
         raise ValueError(f"{problem}: {missing}")
 
 
-def _type(prop: Any) -> str:
-    if not isinstance(prop, dict):
+def _type(prop: Any, depth: int = 0) -> str:
+    if not isinstance(prop, dict) or depth > MAX_DEPTH:  # a server can nest without end
         return "Any"
     kind = prop.get("type")
     if kind is None and isinstance(prop.get("anyOf"), list):
-        return " | ".join(_type(p) for p in prop["anyOf"])
+        return " | ".join(_type(p, depth + 1) for p in prop["anyOf"])
     if isinstance(kind, list):
-        return " | ".join(_type({"type": k}) for k in kind)
+        return " | ".join(_type({"type": k}, depth + 1) for k in kind)
     if kind == "array" and isinstance(prop.get("items"), dict):
-        return f"list[{_type(prop['items'])}]"
+        return f"list[{_type(prop['items'], depth + 1)}]"
     return TYPES.get(kind, "Any") if isinstance(kind, str) else "Any"
+
+
+def _param(name: str) -> str:
+    """A parameter name as shown: plain when it is a short identifier, else quoted, so a
+    server cannot break a stub or a summary line with it."""
+    return name if name.isidentifier() and len(name) <= MAX_PARAM else repr(name[:MAX_PARAM])
 
 
 def render_stub(tool: Tool) -> str:
@@ -148,7 +156,7 @@ def render_stub(tool: Tool) -> str:
     schema = tool.input_schema
     required = set(schema.get("required", []))
     params = ", ".join(
-        f"{name}: {_type(prop)}{'' if name in required else ' (optional)'}"
+        f"{_param(name)}: {_type(prop)}{'' if name in required else ' (optional)'}"
         for name, prop in schema.get("properties", {}).items()
     )
     text = f"{tool.description.strip()}\n\nparams: {params or 'none'}"
@@ -170,7 +178,7 @@ def catalog(tools: Iterable[Tool]) -> dict[str, str]:
 def summary(tool: Tool) -> str:
     """One line: the name, the argument names and the description's first sentence."""
     first = re.split(r"\. |\n", tool.description.strip(), maxsplit=1)[0]
-    params = ", ".join(tool.input_schema.get("properties", {}))
+    params = ", ".join(_param(name) for name in tool.input_schema.get("properties", {}))
     label = " [private]" if tool.private else ""
     return f"{tool.function}({params}){label}: {first}"[:MAX_SUMMARY]
 

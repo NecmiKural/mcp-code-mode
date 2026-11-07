@@ -10,6 +10,7 @@ and one call budget covers a run across all of them. It offers what `run_code` a
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterable
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -50,7 +51,16 @@ CHECKS: dict[str, tuple[Callable[[Any], bool], str]] = {
 }
 
 
+def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [key for key, _ in pairs]
+    if twice := sorted({key for key in keys if keys.count(key) > 1}):
+        raise ValueError(f"{twice[0]!r} appears twice in one object")
+    return dict(pairs)
+
+
 def _entry(name: str, raw: Any) -> Entry:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):  # it becomes every tool name's prefix
+        raise ValueError(f"server name {name!r} must be letters, digits, _ or -")
     if not isinstance(raw, dict):
         raise ValueError(f"server {name!r}: must be an object")
     if extra := sorted(set(raw) - set(CHECKS)):
@@ -73,7 +83,9 @@ def load_config(path: str) -> dict[str, Entry]:
     the entry and the key in the message, rather than being half supported."""
     try:
         with open(path, encoding="utf-8") as file:
-            config = json.load(file)
+            config = json.load(file, object_pairs_hook=_unique)
+    except OSError as exc:
+        raise ValueError(f"cannot read {path}: {exc.strerror}") from exc
     except json.JSONDecodeError as exc:
         raise ValueError(f"{path} is not JSON with an mcpServers object: {exc}") from exc
     servers = config.get("mcpServers") if isinstance(config, dict) else None

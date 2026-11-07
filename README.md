@@ -183,8 +183,9 @@ The code is written by a model that may be confused or steered by text it read, 
 | A label quietly misses its tool | A private label on a tool that was not kept (a typo, a bad schema, a name taken) stops startup | `test_labels_must_name_kept_tools` |
 | A server stuffs the description or the search | Descriptions cut at 2 KiB; stubs shown only within 12,000 characters, else one line per tool | `test_long_descriptions_are_cut`, `test_the_description_falls_back_to_summaries` |
 | Discovery reaches a server or spends calls | `TOOLS` and `search_tools` run in the sandbox over the catalog sent at start | `test_discovery_never_reaches_the_server` |
-| A config option is half supported | Only stdio entries; unknown keys, `url` and `headers` stop startup by name; `--config` excludes the single-server options | `test_config_errors_name_the_entry_and_key`, `test_config_excludes_single_server_options` |
-| Two servers collide, or one fails to start | A name both would produce stops startup; a failing server closes the ones already open | `test_a_name_clash_across_servers_stops_startup`, `test_a_failing_entry_closes_the_others` |
+| A config option is half supported | Only stdio entries; unknown keys, `url` and `headers` stop startup by name; a server name twice, empty or not letters, digits, `_` or `-` stops it too; `--config` excludes the single-server options | `test_config_errors_name_the_entry_and_key`, `test_server_names_must_be_unique_words`, `test_config_excludes_single_server_options` |
+| A server's schema crashes startup or breaks a stub | A schema too deep to check leaves that tool out; stub types stop at 5 levels; odd or long parameter names are quoted and cut at 64 characters | `test_a_schema_too_deep_to_check_is_left_out_not_fatal`, `test_hostile_schemas_still_render_bounded` |
+| Two servers collide, or one fails to start | A name both would produce stops startup; a failing server closes the ones already open | `test_a_name_clash_across_servers_stops_startup`, `test_a_clash_through_the_separator_stops_startup`, `test_a_failing_entry_closes_the_others` |
 | A config's `env` reaches the code | It goes to that wrapped server's process only | `test_config_serves_two_servers_and_their_env_stays_on_the_host` |
 
 The tests that need Docker skip locally without it and fail under CI, where the image is built first.

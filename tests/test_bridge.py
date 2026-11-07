@@ -271,3 +271,32 @@ def test_private_tools_say_so_in_stubs_and_summaries(private_add):
     assert "private: once called, only private tools can be called" in render_stubs([tools["add"]])
     assert "private" not in render_stubs([tools["echo"]])
     assert "add(a, b) [private]: Add two integers." in render_tools(tools.values(), 0 + 400)
+
+
+def nested(levels: int) -> dict:
+    deep: dict = {"type": "string"}
+    for _ in range(levels):
+        deep = {"type": "array", "items": deep}
+    return deep
+
+
+def test_a_schema_too_deep_to_check_is_left_out_not_fatal():
+    schema = {"type": "object", "properties": {"deep": nested(300)}}
+    listed = [
+        McpTool(name="abyss", input_schema=schema),
+        McpTool(name="fine", input_schema={"type": "object"}),
+    ]
+    assert list(load_tools(listed)) == ["fine"]
+
+
+def test_hostile_schemas_still_render_bounded():
+    deep = nested(40)
+    schema = {
+        "type": "object",
+        "properties": {"deep": deep, "a\nb [private]": {"type": "string"}, "n" * 500: {}},
+    }
+    tools = load_tools([McpTool(name="odd", description="Odd.", input_schema=schema)])
+    stub = render_stubs(tools.values())
+    assert "deep: list[list[list[list[list[Any]]]]] (optional)" in stub
+    assert "'a\\nb [private]': str (optional)" in stub and "n" * 65 not in stub
+    assert render_tools(tools.values(), 200).startswith("odd(deep, 'a\\nb [private]', 'nnn")

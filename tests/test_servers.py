@@ -156,3 +156,34 @@ def test_serve_wraps_a_command_or_a_config(tmp_path, capsys):
     with pytest.raises(SystemExit):
         open_tools(parser.parse_args(["serve"]), parser)
     assert "--config FILE" in capsys.readouterr().err
+
+
+def test_a_clash_through_the_separator_stops_startup():
+    from mcp.server.mcpserver import MCPServer
+
+    first, second = MCPServer("first"), MCPServer("second")
+    first.tool(name="c")(lambda: "c")
+    second.tool(name="b__c")(lambda: "b__c")
+    entries = {"a__b": Entry(first), "a": Entry(second)}
+    with pytest.raises(ValueError, match="a__b__c is a tool of both"), Servers(entries):
+        pass
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ('{"mcpServers": {"notes": {"command": "a"}, "notes": {"command": "b"}}}', "twice"),
+        ('{"mcpServers": {"": {"command": "a"}}}', "server name"),
+        ('{"mcpServers": {"my notes": {"command": "a"}}}', "server name"),
+    ],
+)
+def test_server_names_must_be_unique_words(tmp_path, body, message):
+    path = tmp_path / "servers.json"
+    path.write_text(body)
+    with pytest.raises(ValueError, match=message):
+        load_config(str(path))
+
+
+def test_a_missing_config_is_a_clear_error(tmp_path):
+    with pytest.raises(ValueError, match="cannot read"):
+        load_config(str(tmp_path / "nowhere.json"))
