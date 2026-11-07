@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-IMAGE = "mcp-code-mode-sandbox:1"  # bump the tag when runner.py's protocol changes
+IMAGE = "mcp-code-mode-sandbox:2"  # bump the tag when runner.py's protocol changes
 IMAGE_DIR = Path(__file__).parent / "image"
 NAME_PREFIX = "mcp-sbx-"
 DEADLINE_S = 90.0
@@ -132,8 +132,9 @@ class Sandbox:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
-    def start(self, tools: list[str]) -> None:
-        """Start the container with one async function per name in `tools`."""
+    def start(self, tools: list[str], catalog: dict[str, str] | None = None) -> None:
+        """Start the container with one async function per name in `tools`, and `catalog`
+        (each tool's stub by name) behind TOOLS and search_tools."""
         began = time.perf_counter()
         self._proc = subprocess.Popen(
             docker_argv(self.name, self.image),
@@ -143,8 +144,11 @@ class Sandbox:
             env=docker_env(),
         )
         threading.Thread(target=self._read, daemon=True).start()
-        self._send({"type": "init", "tools": list(tools)})
-        message = self._next(time.monotonic() + START_TIMEOUT_S)
+        try:
+            self._send({"type": "init", "tools": list(tools), "catalog": catalog or {}})
+            message = self._next(time.monotonic() + START_TIMEOUT_S)
+        except OSError:  # docker exited before reading init
+            message = None
         if not (isinstance(message, dict) and message.get("type") == "ready"):
             self.close()
             raise SandboxError(

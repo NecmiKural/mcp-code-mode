@@ -13,9 +13,9 @@ from mcp_code_mode.sandbox import Refused
 NO_CALLS = lambda method, params: "{}"  # noqa: E731
 
 
-def run(image, code, on_call=NO_CALLS, tools=(), deadline_s=20.0):
+def run(image, code, on_call=NO_CALLS, tools=(), deadline_s=20.0, catalog=None):
     with sandbox.Sandbox(image, deadline_s) as box:
-        box.start(list(tools))
+        box.start(list(tools), catalog)
         return box.run(code, on_call)
 
 
@@ -205,3 +205,48 @@ for fd in range(3, 10):
 """
     result = run(image, code)
     assert result.killed and result.error == "protocol violation"
+
+
+STUBS = {
+    "add": "async def add(params: dict) -> str:\n    Add two integers.",
+    "get_weather": "async def get_weather(params: dict) -> str:\n    The weather in a city.",
+    "forecast": "async def forecast(params: dict) -> str:\n    Tomorrow's weather.",
+}
+
+
+def test_discovery_never_reaches_the_server(image):
+    calls = []
+
+    def on_call(method, params):
+        calls.append(method)
+        return "{}"
+
+    code = """
+print(search_tools("weather"))
+print(search_tools("WEATHER add"))
+print(search_tools("nothing here"), search_tools(""))
+print(TOOLS["add"].splitlines()[1].strip())
+try:
+    TOOLS["missing"]
+except KeyError:
+    print("no such tool")
+"""
+    result = run(image, code, on_call, tools=list(STUBS), catalog=STUBS)
+    assert result.error is None, result.error
+    assert result.stdout.splitlines() == [
+        "['get_weather', 'forecast']",
+        "['add', 'get_weather', 'forecast']",
+        "[] []",
+        "Add two integers.",
+        "no such tool",
+    ]
+    assert calls == []
+
+
+def test_a_sandbox_that_cannot_start_raises_even_with_a_large_catalog(image):
+    stubs = {f"tool_{n}": "x" * 1000 for n in range(300)}  # more than a pipe buffer
+    with (
+        sandbox.Sandbox("mcp-code-mode-sandbox:no-such-tag") as box,
+        pytest.raises(sandbox.SandboxError, match="did not start"),
+    ):
+        box.start(list(stubs), stubs)

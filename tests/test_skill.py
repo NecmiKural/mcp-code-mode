@@ -2,7 +2,13 @@
 
 from pathlib import Path
 
-from mcp_code_mode.bridge import CALL_TIMEOUT_S, MAX_ARG_CHARS, MAX_CALLS, MAX_RESULT_CHARS
+from mcp_code_mode.bridge import (
+    CALL_TIMEOUT_S,
+    INLINE_BUDGET,
+    MAX_ARG_CHARS,
+    MAX_CALLS,
+    MAX_RESULT_CHARS,
+)
 from mcp_code_mode.sandbox import DEADLINE_S, KEEP, MAX_ERROR
 
 SKILL = Path(__file__).resolve().parents[1] / "skills" / "mcp-code-mode" / "SKILL.md"
@@ -18,6 +24,7 @@ def test_the_skill_states_the_defaults_in_the_code():
         f"over {MAX_RESULT_CHARS // 1024} KiB",
         f"{KEEP // 1024} KiB ({KEEP} characters)",
         f"at most {MAX_ERROR} characters",
+        f"pass {INLINE_BUDGET:,} characters",
     ):
         assert stated in text, stated
 

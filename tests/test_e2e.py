@@ -2,6 +2,7 @@
 scripted code calls its tools from the sandbox through the bridge. Needs Docker and the
 sandbox image (see conftest.py)."""
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -40,6 +41,7 @@ async def test_the_wrapped_server_becomes_one_tool_listing_its_stubs(image):
     assert "async def add(params: dict) -> str:" in tool.description
     assert "async def get_answer(params: dict) -> str:" in tool.description
     assert "wipe" not in tool.description
+    assert "search_tools(query)" in tool.description and "TOOLS[name]" in tool.description
 
 
 async def test_code_calls_the_tools_through_the_bridge(image):
@@ -54,7 +56,8 @@ print(sorted(name for name in globals() if not name.startswith('__')))
     assert out["error"] is None and not out["stopped"]
     assert out["stdout"].splitlines() == [
         "[10, 11, 12] hi 42",
-        "['ToolError', 'add', 'asyncio', 'echo', 'get_answer', 'json', 'sums']",
+        "['TOOLS', 'ToolError', 'add', 'asyncio', 'echo', 'get_answer', 'json', 'search_tools',"
+        " 'sums']",
     ]
 
 
@@ -92,3 +95,65 @@ async def test_runaway_code_is_stopped_and_the_next_run_starts_fresh(image):
         second = await run(client, "print('x' in globals())")
     assert first["stopped"] and first["error"] == "deadline exceeded"
     assert second["stdout"] == "False\n" and not second["stopped"]
+
+
+async def test_after_a_private_call_only_private_tools_work_in_any_later_run(image):
+    first = """
+import json
+print(await echo({'text': 'before'}), json.loads(await add({'a': 1, 'b': 2}))['sum'])
+try:
+    await echo({'text': 'after'})
+except ToolError as e:
+    print(str(e)[:29])
+"""
+    later = (
+        "try:\n    await echo({'text': 'later'})\nexcept ToolError as e:\n    print(str(e)[:29])"
+    )
+    async with Client(cli("--private", "add")) as client:
+        [tool] = (await client.list_tools()).tools
+        out = await run(client, first)
+        again = await run(client, later)
+    assert "private: once called, only private tools can be called" in tool.description
+    assert out["stdout"].splitlines() == ["before 3", "refused: echo is not private,"]
+    assert again["stdout"] == "refused: echo is not private,\n"
+
+
+async def test_config_serves_two_servers_and_their_env_stays_on_the_host(image, tmp_path):
+    notes = Path(__file__).with_name("toy_notes.py")
+    config = {
+        "mcpServers": {
+            "toy": {"command": sys.executable, "args": [str(TOY)], "allow": ["add"]},
+            "notes": {
+                "command": sys.executable,
+                "args": [str(notes)],
+                "env": {"NOTES_TOKEN": SENTINEL},
+                "private": True,
+            },
+        }
+    }
+    path = tmp_path / "servers.json"
+    path.write_text(json.dumps(config))
+    docker = {k: os.environ[k] for k in ("DOCKER_HOST", "DOCKER_CONTEXT") if k in os.environ}
+    params = StdioServerParameters(
+        command=str(CLI), args=["serve", "--config", str(path)], env=docker
+    )
+    code = """
+import json, os
+print(json.loads(await toy__add({'a': 2, 'b': 3}))['sum'], await notes__token_seen())
+print(search_tools('notes'), 'NOTES_TOKEN' in json.dumps(dict(os.environ)))
+try:
+    await toy__add({'a': 1, 'b': 1})
+except ToolError as e:
+    print(str(e)[:29])
+"""
+    async with Client(params) as client:
+        [tool] = (await client.list_tools()).tools
+        out = await run(client, code)
+    assert "async def notes__search(params: dict) -> str:" in tool.description
+    assert out["error"] is None, out["error"]
+    assert out["stdout"].splitlines() == [
+        "5 yes",
+        "['notes__search', 'notes__token_seen'] False",
+        "refused: toy__add is not priv",
+    ]
+    assert SENTINEL not in out["stdout"]
