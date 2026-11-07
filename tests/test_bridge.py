@@ -210,3 +210,64 @@ def test_summaries_are_one_line_of_at_most_120_characters():
     lines = render_tools(tools, 0 + 200).splitlines()
     assert lines[0] == "long(): " + "w" * 112
     assert lines[1] == "report(year): Builds the report."
+
+
+@pytest.fixture
+def private_add():
+    toy_server.RAN.clear()
+    with Bridge(toy_server.server, private=["add"]) as b:
+        yield b
+
+
+def test_only_private_tools_after_a_private_call(private_add):
+    assert private_add.call("echo", {"text": "before"}) == "before"
+    private_add.call("add", {"a": 1, "b": 2})
+    with pytest.raises(Refused) as caught:
+        private_add.call("echo", {"text": "after"})
+    assert str(caught.value) == (
+        "refused: echo is not private, and this session already called the private tool add;"
+        " only private tools can be called until mcp-code-mode restarts"
+    )
+    private_add.call("add", {"a": 3, "b": 4})
+    assert toy_server.RAN == ["echo", "add", "add"]
+
+
+def test_a_refused_private_call_does_not_taint(private_add):
+    with pytest.raises(Refused, match="invalid arguments"):
+        private_add.call("add", {"a": "one", "b": 2})
+    assert private_add.call("echo", {"text": "still fine"}) == "still fine"
+
+
+def test_a_failed_private_call_still_taints():
+    with Bridge(toy_server.server, private=["fail"]) as b:
+        with pytest.raises(Refused, match="secret row"):
+            b.call("fail", {"reason": "secret row"})
+        with pytest.raises(Refused, match="already called the private tool fail"):
+            b.call("echo", {"text": "secret row"})
+
+
+def test_the_taint_lasts_for_the_process(private_add):
+    private_add.budget(5)("add", {"a": 1, "b": 1})
+    with pytest.raises(Refused, match="not private"):
+        private_add.budget(5)("echo", {"text": "a later run"})
+
+
+def test_labels_must_name_kept_tools():
+    with (
+        pytest.raises(ValueError, match="labelled private but not tools"),
+        Bridge(toy_server.server, private=["drop_table"]),
+    ):
+        pass
+    listed = [
+        McpTool(name="a_b", input_schema={"type": "object"}),
+        McpTool(name="a-b", input_schema={"type": "object"}),
+    ]
+    with pytest.raises(ValueError, match=r"\['a-b'\]"):
+        load_tools(listed, private=["a-b"])
+
+
+def test_private_tools_say_so_in_stubs_and_summaries(private_add):
+    tools = private_add.tools
+    assert "private: once called, only private tools can be called" in render_stubs([tools["add"]])
+    assert "private" not in render_stubs([tools["echo"]])
+    assert "add(a, b) [private]: Add two integers." in render_tools(tools.values(), 0 + 400)

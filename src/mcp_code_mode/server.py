@@ -94,6 +94,13 @@ def main(argv: list[str] | None = None) -> None:
         "--allow", action="append", metavar="TOOL", help="expose only this tool (repeatable)"
     )
     serve.add_argument(
+        "--private",
+        action="append",
+        default=[],
+        metavar="TOOL",
+        help="mark this tool private: once one is called, only private tools can be (repeatable)",
+    )
+    serve.add_argument(
         "--env",
         action="append",
         default=[],
@@ -113,7 +120,7 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="mcp-code-mode: %(message)s")
     env = {name: os.environ[name] for name in args.env if name in os.environ}
     params = StdioServerParameters(command=command[0], args=command[1:], env=env or None)
-    with Bridge(params, args.allow) as bridge:
+    with Bridge(params, args.allow, args.private) as bridge:
         build_server(bridge, args.image, args.deadline, args.max_calls).run()
 
 

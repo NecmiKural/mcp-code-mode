@@ -57,6 +57,7 @@ class Tool:
     description: str
     input_schema: dict[str, Any]
     validator: Any
+    private: bool = False  # may see private data: see Flow
 
 
 def function_name(name: str) -> str:
@@ -72,11 +73,18 @@ def function_name(name: str) -> str:
     return ident
 
 
-def load_tools(listed: Iterable[Any], allow: Iterable[str] | None = None) -> dict[str, Tool]:
+def load_tools(
+    listed: Iterable[Any],
+    allow: Iterable[str] | None = None,
+    private: Iterable[str] | bool = (),
+) -> dict[str, Tool]:
     """The wrapped server's tools by Python name, only those on the allowlist (None allows
-    all). A tool whose input schema is not valid JSON Schema, or whose Python name an earlier
-    tool already took, is left out: a call to it could not be checked or named."""
+    all), with the tools named in `private` (True for all) marked private. A tool whose input
+    schema is not valid JSON Schema, or whose Python name an earlier tool already took, is left
+    out: a call to it could not be checked or named. A private label on a tool that was not
+    kept is an error, so a typo cannot quietly switch the rule off."""
     wanted = None if allow is None else set(allow)
+    labelled = set() if isinstance(private, bool) else set(private)
     tools: dict[str, Tool] = {}
     seen = set()
     for spec in listed:
@@ -99,9 +107,14 @@ def load_tools(listed: Iterable[Any], allow: Iterable[str] | None = None) -> dic
             log.warning("left out %s: %s is taken by %s", spec.name, function, tools[function].name)
             continue
         description = (spec.description or "")[:MAX_DESCRIPTION]
-        tools[function] = Tool(spec.name, function, description, schema, checker(schema))
+        is_private = private is True or spec.name in labelled
+        tools[function] = Tool(
+            spec.name, function, description, schema, checker(schema), is_private
+        )
     if wanted is not None and (missing := sorted(wanted - seen)):
         raise ValueError(f"not tools of the wrapped server: {missing}")
+    if lost := sorted(labelled - {tool.name for tool in tools.values()}):
+        raise ValueError(f"labelled private but not tools this bridge kept: {lost}")
     return tools
 
 
@@ -127,7 +140,10 @@ def render_stub(tool: Tool) -> str:
         f"{name}: {_type(prop)}{'' if name in required else ' (optional)'}"
         for name, prop in schema.get("properties", {}).items()
     )
-    doc = textwrap.indent(f"{tool.description.strip()}\n\nparams: {params or 'none'}", "    ")
+    text = f"{tool.description.strip()}\n\nparams: {params or 'none'}"
+    if tool.private:
+        text += "\nprivate: once called, only private tools can be called"
+    doc = textwrap.indent(text, "    ")
     return f'async def {tool.function}(params: dict) -> str:\n    """\n{doc}\n    """'
 
 
@@ -144,7 +160,8 @@ def summary(tool: Tool) -> str:
     """One line: the name, the argument names and the description's first sentence."""
     first = re.split(r"\. |\n", tool.description.strip(), maxsplit=1)[0]
     params = ", ".join(tool.input_schema.get("properties", {}))
-    return f"{tool.function}({params}): {first}"[:MAX_SUMMARY]
+    label = " [private]" if tool.private else ""
+    return f"{tool.function}({params}){label}: {first}"[:MAX_SUMMARY]
 
 
 def render_tools(tools: Iterable[Tool], budget: int = INLINE_BUDGET) -> str:
@@ -168,6 +185,34 @@ def render_tools(tools: Iterable[Tool], budget: int = INLINE_BUDGET) -> str:
     return "\n".join(lines)
 
 
+class Flow:
+    """The private-data rule for one mcp-code-mode process. A private tool may see private
+    data: its results may hold some and its arguments may carry some to its server. From the
+    first admitted call to a private tool on, only private tools can be called: any other
+    tool's arguments reach a server that may send them on. What one run printed is in the
+    model's context, so the rule lasts for the process, not the run. Shared by every bridge of
+    the process."""
+
+    def __init__(self) -> None:
+        self.first: str | None = None  # the private tool that started the rule
+        self._lock = threading.Lock()  # two run_python calls can run at once
+
+    def admit(self, tool: Tool) -> None:
+        """Refuse a tool that is not private once the rule has started; start it on the first
+        private tool. Called right before a call goes out, after every other check, so a call
+        refused earlier starts nothing and a call that then fails still does."""
+        with self._lock:
+            if self.first is not None and not tool.private:
+                raise Refused(
+                    f"refused: {tool.function} is not private, and this session already called"
+                    f" the private tool {self.first}; only private tools can be called until"
+                    " mcp-code-mode restarts"
+                )
+            if tool.private and self.first is None:
+                self.first = tool.function
+                log.info("%s is private: only private tools can be called from now on", self.first)
+
+
 def _text(result: Any) -> str:
     return "\n".join(getattr(c, "text", f"[{c.type} content left out]") for c in result.content)
 
@@ -182,12 +227,15 @@ class Bridge:
         self,
         server: Any,
         allow: Iterable[str] | None = None,
+        private: Iterable[str] | bool = (),
         *,
+        flow: Flow | None = None,
         max_arg_chars: int = MAX_ARG_CHARS,
         max_result_chars: int = MAX_RESULT_CHARS,
         call_timeout_s: float = CALL_TIMEOUT_S,
     ) -> None:
-        self.server, self.allow = server, allow
+        self.server, self.allow, self.private = server, allow, private
+        self.flow = flow or Flow()
         self.max_arg_chars, self.max_result_chars = max_arg_chars, max_result_chars
         self.call_timeout_s = call_timeout_s
         self.tools: dict[str, Tool] = {}
@@ -208,7 +256,7 @@ class Bridge:
             self._stop()
             raise
         try:
-            self.tools = load_tools(listed, self.allow)
+            self.tools = load_tools(listed, self.allow, self.private)
         except BaseException:
             self.__exit__()
             raise
@@ -277,6 +325,7 @@ class Bridge:
             raise Refused(f"arguments are {size} characters; the limit is {self.max_arg_chars}")
         if (error := exceptions.best_match(tool.validator.iter_errors(params))) is not None:
             raise Refused(f"invalid arguments for {function}: {error.message}")
+        self.flow.admit(tool)
         result = self._send(tool.name, params)
         if result.is_error:
             raise Refused(_text(result) or f"{function} failed")

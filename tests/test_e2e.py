@@ -94,3 +94,24 @@ async def test_runaway_code_is_stopped_and_the_next_run_starts_fresh(image):
         second = await run(client, "print('x' in globals())")
     assert first["stopped"] and first["error"] == "deadline exceeded"
     assert second["stdout"] == "False\n" and not second["stopped"]
+
+
+async def test_after_a_private_call_only_private_tools_work_in_any_later_run(image):
+    first = """
+import json
+print(await echo({'text': 'before'}), json.loads(await add({'a': 1, 'b': 2}))['sum'])
+try:
+    await echo({'text': 'after'})
+except ToolError as e:
+    print(str(e)[:29])
+"""
+    later = (
+        "try:\n    await echo({'text': 'later'})\nexcept ToolError as e:\n    print(str(e)[:29])"
+    )
+    async with Client(cli("--private", "add")) as client:
+        [tool] = (await client.list_tools()).tools
+        out = await run(client, first)
+        again = await run(client, later)
+    assert "private: once called, only private tools can be called" in tool.description
+    assert out["stdout"].splitlines() == ["before 3", "refused: echo is not private,"]
+    assert again["stdout"] == "refused: echo is not private,\n"
